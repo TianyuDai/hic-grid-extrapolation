@@ -14,6 +14,8 @@ from sklearn.preprocessing import StandardScaler
 from . import cachedir, lazydict, model
 from .design import Design
 
+from pprint import pprint
+
 
 class _Covariance:
     """
@@ -71,6 +73,7 @@ class Emulator:
                 index += n
 
         # StandardScaler with_mean is unnecessary since PCA removes the mean
+        # StandardScalar is to remove the mean and scale to one variance
         self.scaler = StandardScaler(with_mean=False, copy=False)
         self.pca = PCA(npc, copy=False, whiten=True, svd_solver='full')
         # XXX Although a pipeline is used here for convenience, the scaler and
@@ -93,7 +96,7 @@ class Emulator:
                 noise_level_bounds=(1e-8, 10)
             )
         )
-
+        # Gaussian Process Regression
         self.gps = [
             GPR(
                 kernel=kernel, alpha=0,
@@ -140,7 +143,7 @@ class Emulator:
                 for subobs, s in slices.items()
             } for obs, slices in self._slices.items()
         }
-
+    #@classmethod
     def predict(self, X, return_cov=False):
         """
         Predict model output at X.
@@ -176,6 +179,7 @@ class Emulator:
 
         """
         gp_mean = [gp.predict(X, return_cov=return_cov) for gp in self.gps]
+        # pprint (gp_mean[0])
 
         if return_cov:
             gp_mean, gp_cov = zip(*gp_mean)
@@ -265,7 +269,8 @@ class Emulator:
 
 
 emulators = lazydict(Emulator.from_cache)
-
+root = logging.getLogger()
+root.setLevel(logging.DEBUG)
 
 if __name__ == '__main__':
     import argparse

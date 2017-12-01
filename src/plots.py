@@ -1,6 +1,5 @@
 """ plots / visualizations / figures """
 
-import colorsys
 import itertools
 import logging
 from pathlib import Path
@@ -9,11 +8,13 @@ import tempfile
 import warnings
 
 import h5py
+import hsluv
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import lines
 from matplotlib import patches
 from matplotlib import ticker
+from scipy import special
 from scipy.interpolate import PchipInterpolator
 from sklearn.decomposition import PCA
 from sklearn.gaussian_process import GaussianProcessRegressor as GPR
@@ -23,16 +24,6 @@ from sklearn.mixture import GaussianMixture
 from . import workdir, systems, parse_system, expt, model, mcmc
 from .design import Design
 from .emulator import emulators
-
-
-def darken(rgba, amount=.5):
-    h, l, s = colorsys.rgb_to_hls(*rgba[:3])
-    r, g, b = colorsys.hls_to_rgb(h, l*amount, s)
-
-    try:
-        return r, g, b, rgba[3]
-    except IndexError:
-        return r, g, b
 
 
 fontsmall, fontnormal, fontlarge = 5, 6, 7
@@ -138,70 +129,138 @@ def set_tight(fig=None, **kwargs):
     fig.set_tight_layout(kwargs)
 
 
-def remove_ticks(*axes):
-    """
-    Remove all tick marks (but not labels).
-
-    """
-    if not axes:
-        axes = plt.gcf().axes
-
-    for ax in axes:
-        ax.xaxis.set_ticks_position('none')
-        ax.yaxis.set_ticks_position('none')
-
-
-def auto_ticks(
-        ax, xy=None, nbins=5, steps=[1, 2, 4, 5, 10],
-        prune=None, minor=0
-):
+def auto_ticks(ax, axis='both', minor=False, **kwargs):
     """
     Convenient interface to matplotlib.ticker locators.
 
     """
-    if xy == 'x':
-        axes = ax.xaxis,
-    elif xy == 'y':
-        axes = ax.yaxis,
-    else:
-        axes = ax.xaxis, ax.yaxis
+    axis_list = []
 
-    for axis in axes:
-        axis.set_major_locator(
-            ticker.MaxNLocator(nbins=nbins, steps=steps, prune=prune)
-        )
+    if axis in {'x', 'both'}:
+        axis_list.append(ax.xaxis)
+    if axis in {'y', 'both'}:
+        axis_list.append(ax.yaxis)
+
+    for axis in axis_list:
+        axis.get_major_locator().set_params(**kwargs)
         if minor:
             axis.set_minor_locator(ticker.AutoMinorLocator(minor))
 
 
+def format_system(system):
+    """
+    Format a system string into a display name, e.g.:
+
+    >>> format_system('PbPb2760')
+    'Pb+Pb 2.76 TeV'
+
+    >>> format_system('AuAu200')
+    'Au+Au 200 GeV'
+
+    """
+    proj, energy = parse_system(system)
+
+    if energy > 1000:
+        energy /= 1000
+        prefix = 'T'
+    else:
+        prefix = 'G'
+
+    return '{} {} {}eV'.format('+'.join(proj), energy, prefix)
+
+
+def darken(rgb, amount=.5):
+    """
+    Darken a color by the given amount in HSLuv space.
+
+    """
+    h, s, l = hsluv.rgb_to_hsluv(rgb)
+    return hsluv.hsluv_to_rgb((h, s, (1 - amount)*l))
+
+
+def obs_color_hsluv(obs, subobs):
+    """
+    Return a nice color for the given observable in HSLuv space.
+    Use obs_color() to obtain an RGB color.
+
+    """
+    if obs in {'dNch_deta', 'pT_fluct'}:
+        return 250, 90, 55
+
+    if obs == 'dET_deta':
+        return 10, 65, 55
+
+    if obs in {'dN_dy', 'mean_pT'}:
+        return dict(
+            pion=(210, 85, 70),
+            kaon=(130, 88, 68),
+            proton=(30, 90, 62),
+        )[subobs]
+
+    if obs == 'vnk':
+        return {
+            2: (230, 90, 65),
+            3: (150, 90, 67),
+            4: (310, 70, 50),
+        }[subobs[0]]
+
+    raise ValueError('unknown observable: {} {}'.format(obs, subobs))
+
+
+def obs_color(obs, subobs):
+    """
+    Return a nice color for the given observable.
+
+    """
+    return hsluv.hsluv_to_rgb(obs_color_hsluv(obs, subobs))
+
+
 def _observables_plots():
-    Nch_ET = [
-        ('dNch_deta', None, r'$N_\mathrm{ch}$', 'Greys'),
-        ('dET_deta', None, r'$E_T$', 'PuRd'),
-    ]
+    """
+    Metadata for observables plots.
 
-    def id_parts(obs):
-        return [
-            (obs, 'pion',   r'$\pi^\pm$', 'Blues'),
-            (obs, 'kaon',   r'$K^\pm$', 'Greens'),
-            (obs, 'proton', r'$p\bar p$', 'Reds'),
-        ]
-
-    flows = [
-        ('vnk', (n, 2), '$v_{}$'.format(n), c)
-        for n, c in enumerate(['GnBu', 'Purples', 'Oranges'], start=2)
-    ]
+    """
+    def id_parts_plots(obs):
+        return [(obs, species, dict(label=label)) for species, label in [
+            ('pion', '$\pi$'), ('kaon', '$K$'), ('proton', '$p$')
+        ]]
 
     return [
-        ('Yields',  r',\ '.join([
-            r'$dN_\mathrm{ch}/d\eta',
-            r'dN/dy',
-            r'dE_T/d\eta\ [\mathrm{GeV}]$',
-        ]), (1., 1e5), Nch_ET + id_parts('dN_dy')),
-        ('Mean $p_T$', r'$p_T$ [GeV]', (0, 2.), id_parts('mean_pT')),
-        ('Mean $p_T$ fluctuations', r'$\delta p_T/\langle p_T \rangle$',
-         (0, .05), [('pT_fluct', None, '', 'Greys')]),
-        ('Flow cumulants', r'$v_n\{2\}$', (0, 0.15), flows),
+        dict(
+            title='Yields',
+            ylabel=(
+                r'$dN_\mathrm{ch}/d\eta,\ dN/dy,\ dE_T/d\eta\ [\mathrm{GeV}]$'
+            ),
+            ylim=(1, 1e5),
+            yscale='log',
+            height_ratio=1.5,
+            subplots=[
+                ('dNch_deta', None, dict(label=r'$N_\mathrm{ch}$', scale=25)),
+                ('dET_deta', None, dict(label=r'$E_T$', scale=5)),
+                *id_parts_plots('dN_dy')
+            ]
+        ),
+        dict(
+            title='Mean $p_T$',
+            ylabel=r'$\langle p_T \rangle$ [GeV]',
+            ylim=(0, 1.7),
+            subplots=id_parts_plots('mean_pT')
+        ),
+        dict(
+            title='Mean $p_T$ fluctuations',
+            ylabel=r'$\delta p_T/\langle p_T \rangle$',
+            ylim=(0, .04),
+            subplots=[('pT_fluct', None, dict())]
+        ),
+        dict(
+            title='Flow cumulants',
+            ylabel=r'$v_n\{2\}$',
+            ylim=(0, .12),
+            subplots=[
+                ('vnk', (n, 2), dict(label='$v_{}$'.format(n)))
+                for n in [2, 3, 4]
+            ]
+        )
     ]
 
 
@@ -214,19 +273,22 @@ def _observables(posterior=False):
     plots = _observables_plots()
 
     fig, axes = plt.subplots(
-        nrows=len(systems), ncols=len(plots),
-        figsize=(1.3*fullwidth, .55*fullwidth)
+        nrows=len(plots), ncols=len(systems),
+        figsize=(.8*fullwidth, fullwidth),
+        gridspec_kw=dict(
+            height_ratios=[p.get('height_ratio', 1) for p in plots]
+        )
     )
 
     if posterior:
         samples = mcmc.Chain().samples(100)
 
-    for (system, (title, ylabel, ylim, subplots)), ax in zip(
-            itertools.product(systems, plots), axes.flat
+    for (plot, system), ax in zip(
+            itertools.product(plots, systems), axes.flat
     ):
-        for obs, subobs, label, cmap in subplots:
-            factor = 5**dict(dNch_deta=1, dET_deta=2).get(obs, 0)
-            color = getattr(plt.cm, cmap)(.6)
+        for obs, subobs, opts in plot['subplots']:
+            color = obs_color(obs, subobs)
+            scale = opts.get('scale')
 
             x = model.data[system][obs][subobs]['x']
             Y = (
@@ -235,15 +297,19 @@ def _observables(posterior=False):
                 model.data[system][obs][subobs]['Y']
             )
 
-            for y in Y * factor:
+            if scale is not None:
+                Y = Y*scale
+
+            for y in Y:
                 ax.plot(x, y, color=color, alpha=.08, lw=.3)
 
-            ax.text(
-                x[-1] + 2.5,
-                np.median(Y[:, -1]) * factor,
-                label,
-                color=darken(color), ha='left', va='center'
-            )
+            if 'label' in opts:
+                ax.text(
+                    x[-1] + 3,
+                    np.median(Y[:, -1]),
+                    opts['label'],
+                    color=darken(color), ha='left', va='center'
+                )
 
             try:
                 dset = expt.data[system][obs][subobs]
@@ -251,41 +317,47 @@ def _observables(posterior=False):
                 continue
 
             x = dset['x']
-            y = dset['y'] * factor
+            y = dset['y']
             yerr = np.sqrt(sum(
                 e**2 for e in dset['yerr'].values()
-            )) * factor
+            ))
+
+            if scale is not None:
+                y = y*scale
+                yerr = yerr*scale
 
             ax.errorbar(
                 x, y, yerr=yerr, fmt='o', ms=1.7,
                 capsize=0, color='.25', zorder=1000
             )
 
-        if title == 'Yields':
+        if plot.get('yscale') == 'log':
             ax.set_yscale('log')
             ax.minorticks_off()
         else:
             auto_ticks(ax, 'y', nbins=4, minor=2)
 
+        ax.set_xlim(0, 80)
+        auto_ticks(ax, 'x', nbins=5, minor=2)
+
+        ax.set_ylim(plot['ylim'])
+
         if ax.is_first_row():
-            ax.set_title(title)
+            ax.set_title(format_system(system))
         elif ax.is_last_row():
             ax.set_xlabel('Centrality %')
 
+        if ax.is_first_col():
+            ax.set_ylabel(plot['ylabel'])
+
         if ax.is_last_col():
-            proj, energy = parse_system(system)
             ax.text(
-                1.07, .5, '{} {:.2f} TeV'.format('+'.join(proj), energy/1000),
+                1.02, .5, plot['title'],
                 transform=ax.transAxes, ha='left', va='center',
-                size=plt.rcParams['axes.titlesize'], rotation=-90
+                size=plt.rcParams['axes.labelsize'], rotation=-90
             )
 
-        l = ax.set_ylabel(ylabel)
-        if len(ylabel) > 40:
-            l.set_fontsize(.75*plt.rcParams['axes.labelsize'])
-        ax.set_ylim(ylim)
-
-    set_tight(fig, w_pad=1, rect=[0, 0, .97, 1])
+    set_tight(fig, rect=[0, 0, .97, 1])
 
 
 @plot
@@ -366,9 +438,8 @@ def observables_map():
             ratio_ax.set_xlabel('Centrality %')
 
         if ax.is_last_col():
-            proj, energy = parse_system(system)
             ax.text(
-                1.07, 0, '{} {:.2f} TeV'.format('+'.join(proj), energy/1000),
+                1.07, 0, format_system(system),
                 transform=ax.transAxes, ha='left', va='bottom',
                 size=plt.rcParams['axes.titlesize'], rotation=-90
             )
@@ -459,8 +530,8 @@ def _posterior(
         figsize=2*(scale*fullheight,)
     )
 
-    for ax, d, lim in zip(axes.diagonal(), data, ranges):
-        counts, edges = np.histogram(d, bins=50, range=lim)
+    for samples, key, lim, ax in zip(data, keys, ranges, axes.diagonal()):
+        counts, edges = np.histogram(samples, bins=50, range=lim)
         x = (edges[1:] + edges[:-1]) / 2
         y = .85 * (lim[1] - lim[0]) * counts / counts.max() + lim[0]
         # smooth histogram with monotonic cubic interpolation
@@ -473,12 +544,11 @@ def _posterior(
         ax.set_xlim(lim)
         ax.set_ylim(lim)
 
-        ticks = [lim[0], (lim[0] + lim[1])/2, lim[1]]
-        ax.set_xticks(ticks)
-        ax.set_yticks(ticks)
+        if key == 'dmin3':
+            samples = samples**(1/3)
 
         ax.annotate(
-            format_ci(d), (.62, .92), xycoords='axes fraction',
+            format_ci(samples), (.62, .92), xycoords='axes fraction',
             ha='center', va='bottom', fontsize=4.5
         )
 
@@ -490,40 +560,35 @@ def _posterior(
         )
         axes[nx][ny].set_axis_off()
 
-    for n, label in enumerate(labels):
-        for ax, xy in [(axes[-1, n], 'x'), (axes[n, 0], 'y')]:
-            getattr(ax, 'set_{}label'.format(xy))(
-                label.replace(r'\ [', '$\n$['), fontdict=dict(size=4)
-            )
-            ticklabels = getattr(ax, 'get_{}ticklabels'.format(xy))()
-            for t in ticklabels:
-                t.set_fontsize(3)
-                if (
-                        scale / ndim < .13 and
-                        xy == 'x' and
-                        len(str(sum(ranges[n])/2)) > 4
-                ):
-                    t.set_rotation(30)
-            if xy == 'x':
-                ticklabels[0].set_horizontalalignment('left')
-                ticklabels[-1].set_horizontalalignment('right')
+    for key, label, axb, axl in zip(keys, labels, axes[-1], axes[:, 0]):
+        for axis in [axb.xaxis, axl.yaxis]:
+            axis.set_label_text(label.replace(r'\ [', '$\n$['), fontsize=4)
+            axis.set_tick_params(labelsize=3)
+            if key == 'dmin3':
+                ticks = [0., 1.2, 1.5, 1.7]
+                axis.set_ticklabels(list(map(str, ticks)))
+                axis.set_ticks([t**3 for t in ticks])
             else:
-                ticklabels[0].set_verticalalignment('bottom')
-                ticklabels[-1].set_verticalalignment('top')
+                axis.set_major_locator(ticker.LinearLocator(3))
+                if (
+                        axis.axis_name == 'x'
+                        and scale / ndim < .13
+                        and any(len(str(x)) > 4 for x in axis.get_ticklocs())
+                ):
+                    for t in axis.get_ticklabels():
+                        t.set_rotation(30)
 
-    set_tight(fig, pad=.05, h_pad=.3, w_pad=.3, rect=[0., 0., padr, padt])
+        axb.get_xticklabels()[0].set_horizontalalignment('left')
+        axb.get_xticklabels()[-1].set_horizontalalignment('right')
+        axl.get_yticklabels()[0].set_verticalalignment('bottom')
+        axl.get_yticklabels()[-1].set_verticalalignment('top')
+
+    set_tight(fig, pad=.05, h_pad=.1, w_pad=.1, rect=[0., 0., padr, padt])
 
 
 @plot
 def posterior():
-    _posterior(
-        ignore={'norm {}'.format(s) for s in systems} | {'dmin3', 'etas_hrg'}
-    )
-
-
-@plot
-def posterior_withnorm():
-    _posterior(scale=1.2, ignore={'dmin3', 'etas_hrg'})
+    _posterior(ignore={'etas_hrg'}, scale=1.6, padr=1., padt=.99)
 
 
 @plot
@@ -1178,6 +1243,248 @@ def trento_events():
     set_tight(fig, h_pad=.5)
 
 
+def boxplot(
+        ax, percentiles, x=0, y=0, box_width=1, line_width=1,
+        color=(0, 0, 0), alpha=.6, zorder=10
+):
+    """
+    Draw a minimal boxplot.
+
+    `percentiles` must be a np.array of five numbers:
+
+        whisker_low, quartile_1, median, quartile_3, whisker_high
+
+    """
+    pl, q1, q2, q3, ph = percentiles + y
+
+    # IQR box
+    ax.add_patch(patches.Rectangle(
+        xy=(x - .5*box_width, q1),
+        width=box_width, height=(q3 - q1),
+        color=color, alpha=alpha, lw=0, zorder=zorder
+    ))
+
+    # median line
+    ax.plot(
+        [x - .5*box_width, x + .5*box_width], 2*[q2],
+        lw=line_width, solid_capstyle='butt', color=color,
+        zorder=zorder + 1
+    )
+
+    # whisker lines
+    for y in [[q1, pl], [q3, ph]]:
+        ax.plot(
+            2*[x], y, lw=line_width, solid_capstyle='butt',
+            color=color, alpha=alpha, zorder=zorder
+        )
+
+
+@plot
+def validation_all(system='PbPb2760'):
+    """
+    Emulator validation: normalized residuals and RMS error for each
+    observable.
+
+    """
+    fig, (ax_box, ax_rms) = plt.subplots(
+        nrows=2, figsize=(10, 4),
+        gridspec_kw=dict(height_ratios=[1.5, 1])
+    )
+
+    index = 1
+    ticks = []
+    ticklabels = []
+
+    vdata = model.validation_data[system]
+    emu = emulators[system]
+    mean, cov = emu.predict(
+        Design(system, validation=True).array,
+        return_cov=True
+    )
+
+    def label(obs, subobs):
+        if obs.startswith('d') and obs.endswith('_deta'):
+            return r'$d{}/d\eta$'.format(
+                {'Nch': r'N_\mathrm{ch}', 'ET': r'E_T'}[obs[1:-5]])
+
+        id_parts_labels = {'dN_dy': 'dN/dy', 'mean_pT': r'\langle p_T \rangle'}
+        if obs in id_parts_labels:
+            return '${}\ {}$'.format(
+                id_parts_labels[obs],
+                {'pion': '\pi', 'kaon': 'K', 'proton': 'p'}[subobs]
+            )
+
+        if obs == 'pT_fluct':
+            return r'$\delta p_T/\langle p_T \rangle$'
+
+        if obs == 'vnk':
+            return r'$v_{}\{{{}\}}$'.format(*subobs)
+
+    for obs, subobslist in emu.observables:
+        for subobs in subobslist:
+            color = obs_color(obs, subobs)
+
+            Y = vdata[obs][subobs]['Y']
+            Y_ = mean[obs][subobs]
+            S_ = np.sqrt(cov[(obs, subobs), (obs, subobs)].T.diagonal())
+
+            Z = (Y_ - Y)/S_
+
+            for i, percentiles in enumerate(
+                    np.percentile(Z, [10, 25, 50, 75, 90], axis=0).T,
+                    start=index
+            ):
+                boxplot(ax_box, percentiles, x=i, box_width=.75, color=color)
+
+            rms = 100*np.sqrt(np.square(Y_/Y - 1).mean(axis=0))
+            ax_rms.plot(
+                np.arange(index, index + rms.size), rms, 'o', color=color
+            )
+
+            ticks.append(.5*(index + i))
+            ticklabels.append(label(obs, subobs))
+
+            index = i + 2
+
+    ax_box.set_xticks(ticks)
+    ax_box.set_xticklabels(ticklabels)
+    ax_box.tick_params('x', bottom=False, labelsize=plt.rcParams['font.size'])
+
+    ax_box.set_ylim(-2.5, 2.5)
+    ax_box.set_ylabel(r'Normalized residuals')
+
+    q, p = np.sqrt(2) * special.erfinv(2*np.array([.75, .90]) - 1)
+    ax_box.axhspan(-q, q, color='.85', zorder=-20)
+    for s in [-1, 0, 1]:
+        ax_box.axhline(s*p, color='.5', zorder=-10)
+
+    ax_q = ax_box.twinx()
+    ax_q.set_ylim(ax_box.get_ylim())
+    ax_q.set_yticks([-p, -q, 0, q, p])
+    ax_q.set_yticklabels([10, 25, 50, 75, 90])
+    ax_q.tick_params('y', right=False)
+    ax_q.set_ylabel(
+        'Normal quantiles',
+        fontdict=dict(rotation=-90),
+        labelpad=3*plt.rcParams['axes.labelpad']
+    )
+
+    ax_rms.set_xticks([])
+    ax_rms.set_yticks(np.arange(0, 16, 5))
+    ax_rms.set_ylim(0, 15)
+    ax_rms.set_ylabel('RMS % error')
+
+    for y in ax_rms.get_yticks():
+        ax_rms.axhline(y, color='.5', zorder=-10)
+
+    for ax in fig.axes:
+        ax.set_xlim(0, index - 1)
+        ax.spines['bottom'].set_visible(False)
+
+
+@plot
+def validation_example(
+        system='PbPb2760',
+        obs='dNch_deta', subobs=None,
+        label=r'$dN_\mathrm{ch}/d\eta$',
+        cent=(20, 30)
+):
+    """
+    Example of emulator validation for a single observable.  Scatterplot of
+    model calculations vs emulator predictions with histogram and boxplot of
+    normalized residuals.
+
+    """
+    fig, axes = plt.subplots(
+        ncols=2, figsize=(4., 2.5),
+        gridspec_kw=dict(width_ratios=[3, 1])
+    )
+
+    ax_scatter, ax_hist = axes
+
+    vdata = model.validation_data[system][obs][subobs]
+    cent_slc = (slice(None), vdata['cent'].index(cent))
+    y = vdata['Y'][cent_slc]
+
+    mean, cov = emulators[system].predict(
+        Design(system, validation=True).array,
+        return_cov=True
+    )
+    y_ = mean[obs][subobs][cent_slc]
+    std_ = np.sqrt(cov[(obs, subobs), (obs, subobs)].T.diagonal()[cent_slc])
+
+    color = obs_color(obs, subobs)
+    alpha = .6
+
+    ax_scatter.set_aspect('equal')
+    ax_scatter.errorbar(
+        y_, y, xerr=std_,
+        fmt='o', ms=2.5, mew=.1, mec='white',
+        color=color, alpha=alpha
+    )
+    dy = .03*y.ptp()
+    x = [y.min() - dy, y.max() + dy]
+    ax_scatter.plot(x, x, color='.4')
+    ax_scatter.set_xlabel('Emulator prediction')
+    ax_scatter.set_ylabel('Model calculation')
+    ax_scatter.text(
+        .04, .96, '{} {}–{}%'.format(label, *cent),
+        horizontalalignment='left', verticalalignment='top',
+        transform=ax_scatter.transAxes
+    )
+
+    zmax = 3.5
+    zrange = (-zmax, zmax)
+
+    z = (y_ - y)/std_
+
+    ax_hist.hist(
+        z, bins=30, range=zrange, normed=True,
+        orientation='horizontal', color=color, alpha=alpha
+    )
+    x = np.linspace(-zmax, zmax, 1000)
+    ax_hist.plot(np.exp(-.5*x*x)/np.sqrt(2*np.pi), x, color='.25')
+
+    box_x = .75
+    box_width = .1
+
+    boxplot(
+        ax_hist, np.percentile(z, [10, 25, 50, 75, 90]),
+        x=box_x, box_width=box_width, color=color, alpha=alpha
+    )
+
+    guide_width = 2.5*box_width
+
+    q, p = np.sqrt(2) * special.erfinv(2*np.array([.75, .90]) - 1)
+    ax_hist.add_patch(patches.Rectangle(
+        xy=(box_x - .5*guide_width, -q),
+        width=guide_width, height=2*q,
+        color='.85', zorder=-20
+    ))
+    for s in [-1, 0, 1]:
+        ax_hist.plot(
+            [box_x - .5*guide_width, box_x + .5*guide_width], 2*[s*p],
+            color='.5', zorder=-10
+        )
+
+    ax_hist.set_ylim(zrange)
+    ax_hist.spines['bottom'].set_visible(False)
+    ax_hist.tick_params('x', bottom=False, labelbottom=False)
+    ax_hist.set_ylabel('Normalized residuals')
+
+    ax_q = ax_hist.twinx()
+    ax_q.spines['bottom'].set_visible(False)
+    ax_q.set_ylim(ax_hist.get_ylim())
+    ax_q.set_yticks([-p, -q, 0, q, p])
+    ax_q.set_yticklabels([10, 25, 50, 75, 90])
+    ax_q.tick_params('y', right=False)
+    ax_q.set_ylabel(
+        'Normal quantiles',
+        fontdict=dict(rotation=-90),
+        labelpad=3*plt.rcParams['axes.labelpad']
+    )
+
+
 default_system = 'PbPb2760'
 
 
@@ -1265,6 +1572,13 @@ def diag_emu(system=default_system):
 
 if __name__ == '__main__':
     import argparse
+    from matplotlib.mathtext import MathTextWarning
+
+    warnings.filterwarnings(
+        'ignore',
+        category=MathTextWarning,
+        message='Substituting with a symbol from Computer Modern.'
+    )
 
     choices = list(plot_functions)
 

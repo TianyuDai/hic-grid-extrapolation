@@ -185,8 +185,6 @@ def _data():
     # PbPb2760 and PbPb5020 dNch/deta
     for system, args, name in [
             ('PbPb2760', (880049, 1), 'D(N)/DETARAP'),
-            ('PbPb5020', (1410589, 2),
-             r'$\mathrm{d}N_\mathrm{ch}/\mathrm{d}\eta$'),
     ]:
         data[system]['dNch_deta'] = {None: HEPData(*args).dataset(name)}
 
@@ -245,10 +243,6 @@ def _data():
 
     # PbPb2760 and PbPb5020 flows
     for system, tables_nk in [
-            ('PbPb5020', [
-                (1, [(2, 2), (2, 4)]),
-                (2, [(3, 2), (4, 2)]),
-            ]),
             ('PbPb2760', [
                 (3, [(2, 2), (2, 4)]),
                 (4, [(3, 2), (4, 2)]),

@@ -135,7 +135,6 @@ class ModelData:
                 k: self.observables_like(v, k, *keys)
                 for k, v in data.items()
             }
-
         def _compute_bin():
             """
             Choose a function to compute the current observable for a single
@@ -180,7 +179,7 @@ class ModelData:
                 events[int((1 - b/100)*n):int((1 - a/100)*n)]
                 for a, b in cent
             ]
-
+            #print("NOTICE!!!!!", n, events['dN_dy']['kaon']) 
             return list(map(compute_bin, bins))
 
         return dict(
@@ -202,6 +201,7 @@ def _data(system, validation=False):
         Path(workdir, 'model_output', design.type, system, '{}.dat'.format(p))
         for p in design.points
     ]
+    #print (files)
 
     cachefile = Path(cachedir, 'model', design.type, '{}.pkl'.format(system))
 
@@ -246,11 +246,13 @@ def _data(system, validation=False):
 
 data = lazydict(_data)
 validation_data = lazydict(_data, validation=True)
+#root = logging.getLogger()
+#root.setLevel(logging.DEBUG)
 
 
 if __name__ == '__main__':
     from pprint import pprint
     for s in systems:
-        d = data[s]
+        d = validation_data[s]
         print(s)
-        pprint(d)
+        #pprint(d)
